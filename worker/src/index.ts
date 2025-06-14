@@ -24,8 +24,17 @@ function jsonError(msg: string): Response {
 	});
 }
 
+function hexToUint8(hex: string): Uint8Array {
+	if (hex.length % 2 !== 0) throw new Error("Invalid hex");
+	const bytes = new Uint8Array(hex.length / 2);
+	for (let i = 0; i < bytes.length; ++i) {
+		bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+	}
+	return bytes;
+}
+
 // TODO: check if this is slow
-async function urlHashSHA64(canonical_url: string): Promise<bigint> {
+async function urlHashQuick(canonical_url: string): Promise<bigint> {
 	const data = new TextEncoder().encode(canonical_url);
 	const buf = await crypto.subtle.digest("SHA-256", data);
 	const view = new DataView(buf);
@@ -61,6 +70,22 @@ export class Counter extends DurableObject {
 	}
 
 	/**
+	 *  Retrieves the total count of likes minus dislikes for a given URL.
+	 *
+	 * @param hash - The hash of the URL, used for efficient lookups
+	 * @param url - The URL to retrieve the count for
+	 * @returns The total count of likes minus dislikes
+	 */
+	async count(hash: bigint, url: string): Promise<number> {
+		const cursor = this.sql.exec<TotalCount>(`
+			SELECT likes - dislikes AS total
+			FROM counters
+			WHERE hash = ?1 AND url = ?2;
+		`, hash.toString(), url);
+		return Math.max(0, Number([...cursor][0].total));
+	}
+
+	/**
 	 *  Increments the counter for a given URL by a specified count.
 	 *
 	 * @param url  - The URL to increment the counter for
@@ -75,11 +100,11 @@ export class Counter extends DurableObject {
 
 		const cursor = this.sql.exec<TotalCount>(`
 			INSERT INTO counters (hash, url, likes, dislikes)
-			VALUES (?, ?, 0, 0)
-			ON CONFLICT(hash, url) DO UPDATE SET likes = likes + ?, dislikes = dislikes + ?
-			RETURNING likes + dislikes AS total;
-		`, [hash, url, count === 1 ? 1 : 0, count === -1 ? 1 : 0]);
-		return [...cursor][0].total;
+			VALUES (?1, ?2, ?3, ?4)
+			ON CONFLICT(hash, url) DO UPDATE SET likes = likes + ?3, dislikes = dislikes + ?4
+			RETURNING likes - dislikes AS total;
+		`, hash.toString(), url, count === 1 ? 1 : 0, count === -1 ? 1 : 0);
+		return Math.max(0, Number([...cursor][0].total));
 	}
 }
 
@@ -107,7 +132,7 @@ export default {
 			new TextEncoder().encode(env.POW_SECRET),
 			{ name: "HMAC", hash: "SHA-256" },
 			false,
-			["sign"]
+			["sign", "verify"]
 		);
 
 		if (request.method === "GET" && path === "/challenge") {
@@ -118,7 +143,7 @@ export default {
 				return jsonError("Missing or malformed URL parameter");
 			}
 
-			const urlHash = await urlHashSHA64(voteURL.href);
+			const urlHash = await urlHashQuick(voteURL.href);
 			const seed    = crypto.randomUUID().replace(/-/g, "");
 			const exp     = Math.floor(Date.now() / 1000) + ttl_secs;
 			const payload = `${seed}:${urlHash}:${exp}`;
@@ -126,6 +151,21 @@ export default {
 			const sigHex  = [...new Uint8Array(sigBuf)].map(b => b.toString(16).padStart(2, "0")).join("");
 			const token   = btoa(`${payload}:${sigHex}`);
 			return new Response(JSON.stringify({ token, difficulty }), { headers: JSON_HEADERS });
+		}
+
+		if (request.method === "GET" && path === "/votes") {
+			let voteURL;
+			try {
+				voteURL = new URL(urlObj.searchParams.get("url") ?? "");
+			} catch {
+				return jsonError("Missing or malformed URL parameter");
+			}
+			const urlHash = await urlHashQuick(voteURL.href);
+			const domain = voteURL.hostname.toLowerCase();
+			const id   = env.COUNTER.idFromName(domain);
+			const stub = env.COUNTER.get(id);
+			const total = await stub.count(urlHash, voteURL.href);
+			return new Response(JSON.stringify({ total }), { headers: JSON_HEADERS });
 		}
 
 		if (request.method === "POST" && path === "/vote") {
@@ -148,16 +188,19 @@ export default {
 			const raw = atob(token);
 			const [seed, urlHashStr, expStr, sigHex] = raw.split(":");
 			const exp  = Number(expStr);
-			const urlHashExpected = await urlHashSHA64(voteURL.href);
+			const urlHashExpected = await urlHashQuick(voteURL.href);
 			if (urlHashExpected.toString() !== urlHashStr) {
 				return jsonError("Invalid URL hash");
 			}
 			if (exp < Math.floor(Date.now() / 1000)) {
 				return jsonError("Token expired");
 			}
-			const validSig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${seed}:${urlHashStr}:${expStr}`));
-			let matchingSigHex = [...new Uint8Array(validSig)].map(b => b.toString(16).padStart(2, "0")).join("");
-			if (sigHex !== matchingSigHex) return jsonError("Bad signature");
+			const data = new TextEncoder().encode(`${seed}:${urlHashStr}:${expStr}`);
+			const sigBytes = hexToUint8(sigHex);
+			const ok = await crypto.subtle.verify("HMAC", key, sigBytes, data);
+			if (!ok) {
+				return jsonError("Bad signature");
+			}
 
 			const targetPrefix = "0".repeat(difficulty);
 			const digestBuf    = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${token}:${nonce}`));
