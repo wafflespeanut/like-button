@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Like Button",
+  "description": "A like/dislike button for the web",
+  "version": "0.1.0",
+  "icons": {
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "{9ddaf551-60ea-4157-86a2-2ea9ceee321d}",
+      "strict_min_version": "109.0"
+    }
+  },
+  "permissions": [
+    "storage",
+    "cookies"
+  ],
+  "host_permissions": [
+    "https://like-button.waffles.workers.dev/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["pow-worker.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+{
+	"name": "like-button-worker",
+	"version": "0.0.0",
+	"private": true,
+	"scripts": {
+		"prepare": "wrangler types",
+		"build": "wrangler deploy --dry-run",
+		"deploy": "wrangler deploy",
+		"dev": "wrangler dev"
+	}
+}

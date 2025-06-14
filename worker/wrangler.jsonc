@@ -1,0 +1,28 @@
+{
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "like-button",
+	"main": "src/index.ts",
+	"compatibility_date": "2025-06-14",
+	"migrations": [
+		{
+			"new_sqlite_classes": [
+				"Counter"
+			],
+			"tag": "v1"
+		}
+	],
+	"assets": {
+		"directory": "./public"
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Counter",
+				"name": "COUNTER"
+			}
+		]
+	},
+	"observability": {
+		"enabled": true
+	}
+}
