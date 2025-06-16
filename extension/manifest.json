@@ -15,10 +15,10 @@
   },
   "permissions": [
     "storage",
-    "cookies"
+    "scripting"
   ],
   "host_permissions": [
-    "https://like-button.waffles.workers.dev/*"
+    "<all_urls>"
   ],
   "content_scripts": [
     {
@@ -30,11 +30,5 @@
   "background": {
     "service_worker": "background.js",
     "type": "module"
-  },
-  "web_accessible_resources": [
-    {
-      "resources": ["pow-worker.js"],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }

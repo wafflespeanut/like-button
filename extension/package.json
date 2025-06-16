@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "esbuild src/content.ts src/background.ts src/pow-worker.ts --bundle --outdir=dist --format=esm --outbase=src && cp manifest.json dist/",
+    "build": "esbuild src/content.ts src/background.ts --bundle --outdir=dist --format=esm --outbase=src && cp manifest.json dist/ && cp -r icons dist/",
     "dev": "npm run build -- --watch"
   }
 }

@@ -7,7 +7,8 @@ interface EnvType extends Env {
 }
 
 type TotalCount = {
-	total: number;
+	likes: number;
+	dislikes: number;
 }
 
 const JSON_HEADERS = {
@@ -74,15 +75,17 @@ export class Counter extends DurableObject {
 	 *
 	 * @param hash - The hash of the URL, used for efficient lookups
 	 * @param url - The URL to retrieve the count for
-	 * @returns The total count of likes minus dislikes
+	 * @returns The total count of likes and dislikes
 	 */
-	async count(hash: bigint, url: string): Promise<number> {
+	async count(hash: bigint, url: string): Promise<[number, number]> {
 		const cursor = this.sql.exec<TotalCount>(`
-			SELECT likes - dislikes AS total
+			SELECT likes, dislikes
 			FROM counters
 			WHERE hash = ?1 AND url = ?2;
 		`, hash.toString(), url);
-		return Math.max(0, Number([...cursor][0].total));
+		let result = cursor.next();
+		if (result.done) return [0, 0]; // No votes yet
+		return [Number(result.value.likes), Number(result.value.dislikes)];
 	}
 
 	/**
@@ -93,7 +96,7 @@ export class Counter extends DurableObject {
 	 * @returns The new value of the counter after incrementing
 	 * @throws Error if the count is not 1 or -1
 	 */
-	async increment(hash: bigint, url: string, count: number): Promise<number> {
+	async increment(hash: bigint, url: string, count: number): Promise<[number, number]> {
 		if (count !== 1 && count !== -1) {
 			throw new Error("Count must be either 1 or -1");
 		}
@@ -102,9 +105,13 @@ export class Counter extends DurableObject {
 			INSERT INTO counters (hash, url, likes, dislikes)
 			VALUES (?1, ?2, ?3, ?4)
 			ON CONFLICT(hash, url) DO UPDATE SET likes = likes + ?3, dislikes = dislikes + ?4
-			RETURNING likes - dislikes AS total;
+			RETURNING likes, dislikes;
 		`, hash.toString(), url, count === 1 ? 1 : 0, count === -1 ? 1 : 0);
-		return Math.max(0, Number([...cursor][0].total));
+		let result = cursor.next();
+		if (result.done) {
+			throw new Error("Failed to increment counter");
+		}
+		return [Number(result.value.likes), Number(result.value.dislikes)];
 	}
 }
 
@@ -118,6 +125,7 @@ export default {
 	 * @returns The response to be sent back to the client
 	 */
 	async fetch(request: Request, env: EnvType, ctx: ExecutionContext): Promise<Response> {
+		try {
 		if (request.method === "OPTIONS") {
 			return new Response(null, { status: 204, headers: JSON_HEADERS });
 		}
@@ -150,7 +158,7 @@ export default {
 			const sigBuf  = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload));
 			const sigHex  = [...new Uint8Array(sigBuf)].map(b => b.toString(16).padStart(2, "0")).join("");
 			const token   = btoa(`${payload}:${sigHex}`);
-			return new Response(JSON.stringify({ token, difficulty }), { headers: JSON_HEADERS });
+			return new Response(JSON.stringify({ url: voteURL.href, token, difficulty }), { headers: JSON_HEADERS });
 		}
 
 		if (request.method === "GET" && path === "/votes") {
@@ -161,11 +169,12 @@ export default {
 				return jsonError("Missing or malformed URL parameter");
 			}
 			const urlHash = await urlHashQuick(voteURL.href);
-			const domain = voteURL.hostname.toLowerCase();
-			const id   = env.COUNTER.idFromName(domain);
-			const stub = env.COUNTER.get(id);
-			const total = await stub.count(urlHash, voteURL.href);
-			return new Response(JSON.stringify({ total }), { headers: JSON_HEADERS });
+			const domain  = voteURL.hostname.toLowerCase();
+			const id      = env.COUNTER.idFromName(domain);
+			const stub    = env.COUNTER.get(id);
+
+			const [likes, dislikes] = await stub.count(urlHash, voteURL.href);
+			return new Response(JSON.stringify({ url: voteURL.href, hash: urlHash.toString(), likes, dislikes }), { headers: JSON_HEADERS });
 		}
 
 		if (request.method === "POST" && path === "/vote") {
@@ -190,7 +199,7 @@ export default {
 			const exp  = Number(expStr);
 			const urlHashExpected = await urlHashQuick(voteURL.href);
 			if (urlHashExpected.toString() !== urlHashStr) {
-				return jsonError("Invalid URL hash");
+				return jsonError(`Invalid URL hash ${urlHashExpected} != ${urlHashStr}`);
 			}
 			if (exp < Math.floor(Date.now() / 1000)) {
 				return jsonError("Token expired");
@@ -204,7 +213,7 @@ export default {
 
 			const targetPrefix = "0".repeat(difficulty);
 			const digestBuf    = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${token}:${nonce}`));
-			const digestHex = [...new Uint8Array(digestBuf)]
+			const digestHex    = [...new Uint8Array(digestBuf)]
 				.map(b => b.toString(16).padStart(2, "0"))
 				.join("");
 			if (!digestHex.startsWith(targetPrefix)) {
@@ -212,12 +221,16 @@ export default {
 			}
 
 			const domain = voteURL.hostname.toLowerCase();
-			const id   = env.COUNTER.idFromName(domain);
-			const stub = env.COUNTER.get(id);
-			let total = await stub.increment(urlHashExpected, voteURL.href, body.dislike ? -1 : 1);
-			return new Response(JSON.stringify({ total }), { headers: JSON_HEADERS });
+			const id     = env.COUNTER.idFromName(domain);
+			const stub   = env.COUNTER.get(id);
+
+			const [likes, dislikes] = await stub.increment(urlHashExpected, voteURL.href, body.dislike ? -1 : 1);
+			return new Response(JSON.stringify({ url: voteURL.href, hash: urlHashExpected.toString(), likes, dislikes }), { headers: JSON_HEADERS });
 		}
 
 		return new Response("Not found", { status: 404, headers: JSON_HEADERS });
+		} catch (err) {
+			return jsonError(`Internal server error: ${err instanceof Error ? err.message + `\nstack: ${err.stack}` : String(err)}`);
+		}
 	}
 } satisfies ExportedHandler<EnvType>;
